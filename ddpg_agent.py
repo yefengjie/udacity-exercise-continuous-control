@@ -9,14 +9,14 @@ import torch.optim as optim
 
 from model import Actor, Critic
 
-BUFFER_SIZE = int(1e5)  # replay buffer size
+BUFFER_SIZE = int(1e6)  # replay buffer size
 BATCH_SIZE = 128  # minibatch size
 GAMMA = 0.99  # discount factor
 TAU = 1e-3  # for soft update of target parameters
 LR_ACTOR = 1e-4  # learning rate of the actor
-LR_CRITIC = 1e-4  # learning rate of the critic
-WEIGHT_DECAY = 0  # L2 weight decay
-UPDATE_EVERY = 1  # how many steps to take before updating target networks
+LR_CRITIC = 3e-4  # learning rate of the critic
+WEIGHT_DECAY_CR = 1e-4  # L2 weight decay CRITIC
+WEIGHT_DECAY_AC = 0  # L2 weight decay ACTOR
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -46,12 +46,12 @@ class Agent:
         # Actor Network (w/ Target Network)
         self.actor_local = Actor(state_size, action_size, random_seed).to(device)
         self.actor_target = Actor(state_size, action_size, random_seed).to(device)
-        self.actor_optimizer = optim.Adam(self.actor_local.parameters(), lr=LR_ACTOR)
+        self.actor_optimizer = optim.Adam(self.actor_local.parameters(), lr=LR_ACTOR, weight_decay=WEIGHT_DECAY_AC)
 
         # Critic Network (w/ Target Network)
         self.critic_local = Critic(state_size, action_size, random_seed).to(device)
         self.critic_target = Critic(state_size, action_size, random_seed).to(device)
-        self.critic_optimizer = optim.Adam(self.critic_local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
+        self.critic_optimizer = optim.Adam(self.critic_local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY_CR)
 
         hard_copy_weights(self.actor_target, self.actor_local)
         hard_copy_weights(self.critic_target, self.critic_local)
@@ -61,37 +61,29 @@ class Agent:
 
         # Replay memory
         self.memory = ReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, random_seed)
-        
-        # Step counter for Agent
-        self.t_step = 0
 
     # def step(self, state, action, reward, next_state, done):
-    def step(self, states, actions, rewards, next_states, dones, num_updates=1):
+    def step(self, state, action, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
-        # Save experience / reward
-        for state, action, reward, next_state, done in zip(states, actions, rewards, next_states, dones):
-            self.memory.add(state, action, reward, next_state, done)
-        
-        # Learn every UPDATE_EVERY time steps.
-        self.t_step = (self.t_step + 1) % UPDATE_EVERY
-        
-        if self.t_step == 0:
-            if len(self.memory) > BATCH_SIZE:
-                for i in range(num_updates):
-                    experiences = self.memory.sample()
-                    self.learn(experiences, GAMMA)
+        self.memory.add(state, action, reward, next_state, done)
 
-    def act(self, state, add_noise=True, current_score=0, GOAL_SCORE=35):
+        # Learn, if enough samples are available in memory
+        if len(self.memory) > BATCH_SIZE:
+            experiences = self.memory.sample()
+            self.learn(experiences, GAMMA)
+
+    def act(self, state, current_score, goal_score, add_noise=True):
         """Returns actions for given state as per current policy."""
         state = torch.from_numpy(state).float().to(device)
-        self.actor_local.eval()
+
+        self.actor_local.eval()  # set network on eval mode, this has any effect only on certain modules (Dropout, BatchNorm, etc.)
         with torch.no_grad():
             action = self.actor_local(state).cpu().data.numpy()
-        self.actor_local.train()
+        self.actor_local.train()  # set network on train mode
 
         if add_noise:
-            # reduce noise when the score is closed to goal score
-            action += self.noise.sample() * ((GOAL_SCORE - current_score) / GOAL_SCORE)
+            damping_factor = (goal_score - np.min([goal_score, current_score])) / goal_score
+            action += self.noise.sample() * damping_factor
         return np.clip(action, -1, 1)
 
     def reset(self):
@@ -122,7 +114,7 @@ class Agent:
         # Minimize the loss
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic_local.parameters(), 1)
+        # torch.nn.utils.clip_grad_norm_(self.critic_local.parameters(), 1)
         self.critic_optimizer.step()
 
         # ---------------------------- update actor ---------------------------- #
@@ -154,7 +146,7 @@ class Agent:
 class OUNoise:
     """Ornstein-Uhlenbeck process."""
 
-    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.1):
+    def __init__(self, size, seed, mu=0., theta=0.15, sigma=0.2):
         """Initialize parameters and noise process."""
         self.mu = mu * np.ones(size)
         self.theta = theta
@@ -177,7 +169,7 @@ class OUNoise:
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, seed):
+    def __init__(self, action_size, buffer_size, batch_size, random_seed):
         """Initialize a ReplayBuffer object.
         Params
         ======
@@ -188,7 +180,7 @@ class ReplayBuffer:
         self.memory = deque(maxlen=buffer_size)  # internal memory (deque)
         self.batch_size = batch_size
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-        self.seed = random.seed(seed)
+        self.seed = random.seed(random_seed)
 
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
